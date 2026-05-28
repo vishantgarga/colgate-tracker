@@ -31,7 +31,7 @@ function mkS(name,type,visited,order,sensitive,flexi,cdc,smt,smile,notes,sPitch,
     sensitivePitch:sPitch||null, superFlexiPitch:fPitch||null, cdcPitch:cPitch||null,
     notOnVisit:false, notOnVisitReason:"",
     noOrderReason:"", noOrderReasonOther:"" };
-
+}
 const DAY3_STORES = [
   mkS("National dry","General Store",true,true,null,null,false,null,null,""),
   mkS("Noble medical","Medical Store",true,true,null,null,false,null,null,"Reorder the shelf for colgate visibility, sensitive stock was there"),
