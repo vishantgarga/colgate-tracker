@@ -25,11 +25,12 @@ const iS = {
 
 // ─── Seeds ────────────────────────────────────────────────────────────────────
 function mkS(name,type,visited,order,sensitive,flexi,cdc,smt,smile,notes,sPitch,fPitch,cPitch) {
-  return { id:uid(), name, type, visited, orderPlaced:order,
+ return { id:uid(), name, type, visited, orderPlaced:order,
     sensitiveSold:sensitive, superFlexiSold:flexi, cdc200Ordered:cdc,
     smt_contract:smt, smileGoal:smile, notes:notes||"",
-    sensitivePitch:sPitch||null, superFlexiPitch:fPitch||null, cdcPitch:cPitch||null };
-}
+    sensitivePitch:sPitch||null, superFlexiPitch:fPitch||null, cdcPitch:cPitch||null,
+    notOnVisit:false, notOnVisitReason:"",
+    noOrderReason:"", noOrderReasonOther:"" };
 
 const DAY3_STORES = [
   mkS("National dry","General Store",true,true,null,null,false,null,null,""),
@@ -301,7 +302,7 @@ function PitchTable({ title, stores, productField, pitchField, color }) {
 function StoreCard({ store, onChange, onDelete }) {
   const [open, setOpen] = useState(false);
   const set = patch => onChange({ ...store, ...patch });
-  const borderColor = store.visited ? (store.orderPlaced?C.green:C.amber) : C.border;
+ const borderColor = store.notOnVisit ? C.dim : store.visited ? (store.orderPlaced?C.green:C.amber) : C.border;
   return (
     <div style={{ background:C.card, border:`2px solid ${borderColor}`, borderRadius:14, marginBottom:10, overflow:"hidden" }}>
       <div onClick={()=>setOpen(o=>!o)} style={{ padding:"13px 15px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer", userSelect:"none" }}>
@@ -327,10 +328,14 @@ function StoreCard({ store, onChange, onDelete }) {
             {STORE_TYPES.map(t=><option key={t} style={{ background:C.bg }}>{t}</option>)}
           </select>
           <SLabel text="Status" />
-          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-            <Pill label="Visited" on={store.visited} onClick={()=>set({visited:!store.visited})} color={C.accent} />
-            <Pill label="Order Placed" on={store.orderPlaced} onClick={()=>set({orderPlaced:!store.orderPlaced})} color={C.green} />
-          </div>
+<div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+  <Pill label="Visited" on={store.visited} onClick={()=>set({visited:!store.visited, notOnVisit:false})} color={C.accent} />
+  <Pill label="Order Placed" on={store.orderPlaced} onClick={()=>set({orderPlaced:!store.orderPlaced})} color={C.green} />
+  <Pill label="Not visiting" on={store.notOnVisit} onClick={()=>set({notOnVisit:!store.notOnVisit, visited:false, orderPlaced:false})} color={C.red} />
+</div>
+{store.notOnVisit && (
+  <textarea value={store.notOnVisitReason||""} onChange={e=>set({notOnVisitReason:e.target.value})} placeholder="Why not visiting this store?" rows={2} style={{ ...iS, resize:"vertical", lineHeight:1.6, marginTop:8, border:`1px solid ${C.red}40` }} />
+)}
           <SLabel text="Products" />
           <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
             <Tri label="Sensitive TP" val={store.sensitiveSold} onChange={v=>set({sensitiveSold:v,sensitivePitch:v===null?null:store.sensitivePitch})} color={C.purple} />
@@ -349,8 +354,31 @@ function StoreCard({ store, onChange, onDelete }) {
           </div>
           <SLabel text="😊 Smile Goal" />
           <SmileToggle val={store.smileGoal} onChange={v=>set({smileGoal:v})} />
-          <SLabel text="Store Notes" />
-          <textarea value={store.notes} onChange={e=>set({notes:e.target.value})} placeholder="Any notes…" rows={2} style={{ ...iS, resize:"vertical", lineHeight:1.6 }} />
+          {store.visited && !store.orderPlaced && (
+  <div style={{ marginTop:10 }}>
+    <SLabel text="Why no order?" />
+    <select
+      value={store.noOrderReason||""}
+      onChange={e=>set({noOrderReason:e.target.value, noOrderReasonOther:""})}
+      style={{ ...iS, color:store.noOrderReason?C.text:C.muted }}
+    >
+      <option value="">Select reason…</option>
+      <option value="Enough stock">Enough stock</option>
+      <option value="Owner not present">Owner not present</option>
+      <option value="Shop closed / on strike">Shop closed / on strike</option>
+      <option value="Delivery timing conflict">Delivery timing conflict (holiday/festive)</option>
+      <option value="Out of stock at distributor">Out of stock at distributor</option>
+      <option value="Price / margin issue">Price / margin issue</option>
+      <option value="Other">Other</option>
+    </select>
+    {store.noOrderReason === "Other" && (
+      <textarea value={store.noOrderReasonOther||""} onChange={e=>set({noOrderReasonOther:e.target.value})} placeholder="Describe reason…" rows={2} style={{ ...iS, resize:"vertical", lineHeight:1.6, marginTop:6 }} />
+    )}
+  </div>
+)}
+
+<SLabel text="Store Notes" />
+<textarea value={store.notes} onChange={e=>set({notes:e.target.value})} placeholder="Any notes…" rows={2} style={{ ...iS, resize:"vertical", lineHeight:1.6 }} />
           <button onClick={()=>onDelete(store.id)} style={{ background:`${C.red}15`, border:`1px solid ${C.red}40`, borderRadius:10, color:C.red, padding:"10px 0", fontSize:13, cursor:"pointer", fontFamily:"inherit", width:"100%", marginTop:14 }}>Delete Store</button>
         </div>
       )}
@@ -525,7 +553,7 @@ export default function App() {
   const updateStore = updated => commit(days.map((d,i)=>i!==idx?d:{...d,stores:d.stores.map(s=>s.id===updated.id?updated:s)}));
   const deleteStore = id => commit(days.map((d,i)=>i!==idx?d:{...d,stores:d.stores.filter(s=>s.id!==id)}));
   const addStore = () => {
-    const s = { id:uid(), name:newName, type:newType, visited:false, orderPlaced:false, sensitiveSold:null, superFlexiSold:null, cdc200Ordered:null, smt_contract:null, smileGoal:null, notes:"", sensitivePitch:null, superFlexiPitch:null, cdcPitch:null };
+    const s = { id:uid(), name:newName, type:newType, visited:false, orderPlaced:false, sensitiveSold:null, superFlexiSold:null, cdc200Ordered:null, smt_contract:null, smileGoal:null, notes:"", sensitivePitch:null, superFlexiPitch:null, cdcPitch:null, notOnVisit:false, notOnVisitReason:"", noOrderReason:"", noOrderReasonOther:"" };
     commit(days.map((d,i)=>i!==idx?d:{...d,stores:[...d.stores,s]}));
     setNewName(""); setNewType("General Store"); setShowAdd(false);
   };
@@ -536,7 +564,7 @@ export default function App() {
   };
   const resetCheckins = () => {
     if (!window.confirm("Reset all check-ins? Names stay.")) return;
-    commit(days.map((d,i)=>i!==idx?d:{...d,stores:d.stores.map(s=>({...s,visited:false,orderPlaced:false,sensitiveSold:null,superFlexiSold:null,cdc200Ordered:null,smt_contract:null,smileGoal:null,notes:"",sensitivePitch:null,superFlexiPitch:null,cdcPitch:null}))}));
+    commit(days.map((d,i)=>i!==idx?d:{...d,stores:d.stores.map(s=>({...s,visited:false,orderPlaced:false,sensitiveSold:null,superFlexiSold:null,cdc200Ordered:null,smt_contract:null,smileGoal:null,notes:"",sensitivePitch:null,superFlexiPitch:null,cdcPitch:null,notOnVisit:false,notOnVisitReason:"",noOrderReason:"",noOrderReasonOther:""}))}));
   };
 
   const saveDotColor = saveStatus==="saved"?C.green:saveStatus==="saving"?C.amber:C.red;
@@ -580,9 +608,7 @@ export default function App() {
             </div>
             <SLabel text="Route / Area" />
             <input value={day.route} onChange={e=>updateDay({route:e.target.value})} placeholder="e.g. Matunga, Sion…" style={iS} />
-            <SLabel text="😊 Smile Goal (Day)" />
-            <input value={day.smileGoalNote} onChange={e=>updateDay({smileGoalNote:e.target.value})} placeholder="Day smile goal notes…" style={{ ...iS, marginBottom:8 }} />
-            <SmileToggle val={day.smileGoalHit} onChange={v=>updateDay({smileGoalHit:v})} />
+            <SLabel text="📝 Day Notes (optional)" />leGoalHit} onChange={v=>updateDay({smileGoalHit:v})} />
             <SLabel text="📝 Day Notes" />
             <textarea value={day.dayNotes||""} onChange={e=>updateDay({dayNotes:e.target.value})} placeholder="Market observations, competitor activity…" rows={3} style={{ ...iS, resize:"vertical", lineHeight:1.6 }} />
           </div>
