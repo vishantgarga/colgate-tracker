@@ -608,8 +608,7 @@ export default function App() {
             </div>
             <SLabel text="Route / Area" />
             <input value={day.route} onChange={e=>updateDay({route:e.target.value})} placeholder="e.g. Matunga, Sion…" style={iS} />
-            <SLabel text="📝 Day Notes (optional)" />leGoalHit} onChange={v=>updateDay({smileGoalHit:v})} />
-            <SLabel text="📝 Day Notes" />
+            <SLabel text="📝 Day Notes (optional)" />
             <textarea value={day.dayNotes||""} onChange={e=>updateDay({dayNotes:e.target.value})} placeholder="Market observations, competitor activity…" rows={3} style={{ ...iS, resize:"vertical", lineHeight:1.6 }} />
           </div>
 
