@@ -5,7 +5,7 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-const ROW_ID = 'vishant-colgate-v1'
+const ROW_ID = 'vishant-colgate-v2'
 
 export async function loadFromSupabase(fallback) {
   try {
