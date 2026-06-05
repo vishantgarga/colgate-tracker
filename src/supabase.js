@@ -14,7 +14,7 @@ export async function loadFromSupabase(fallback) {
       .select('days')
       .eq('id', ROW_ID)
       .single()
-    if (error || !data) return fallback
+    if (error || !data || !data.days || data.days.length === 0) return fallback
     return data.days
   } catch (_) {
     return fallback
