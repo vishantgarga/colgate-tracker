@@ -1,20 +1,64 @@
 import { useState, useEffect, useRef } from "react";
 import { loadFromSupabase, saveToSupabase } from "./supabase.js";
 
-const STORE_TYPES = ["General Store","Kirana Store","Medical Store","Premium Medical Store","Paan Shop","SMT","Wholesaler"];
 const DAILY_TARGET = 15;
 const PITCH_POSITIONS = ["Start","Middle","End"];
 const NO_PITCH = "No Pitch Needed";
+const STORE_TYPES = ["General Store","Kirana Store","Medical Store","Premium Medical Store","Paan Shop","SMT","Wholesaler"];
 const isMedical = t => t === "Medical Store" || t === "Premium Medical Store";
 const isSMT = t => t === "SMT";
 let _c = Date.now();
 const uid = () => String(_c++);
+
+// ─── Month / Product Config ───────────────────────────────────────────────────
+// June products: each MF size has a Red and Blue variant as separate keys.
+// MF TDP count in summaries = sum of ALL MF variant sales (no separate toggle).
+// Pitch timing: mfPitch (covers all MF), sensitiveTbrsPitch.
+
+const MF_VARIANTS = [
+  { sizeLabel:"MF 20rs",  redKey:"mf20rsRed",  blueKey:"mf20rsBlue"  },
+  { sizeLabel:"MF 80g",   redKey:"mf80gRed",   blueKey:"mf80gBlue"   },
+  { sizeLabel:"MF 100g",  redKey:"mf100gRed",  blueKey:"mf100gBlue"  },
+  { sizeLabel:"MF 150g",  redKey:"mf150gRed",  blueKey:"mf150gBlue"  },
+];
+
+// All individual product keys for June
+const JUNE_KEYS = [
+  ...MF_VARIANTS.flatMap(v=>[v.redKey, v.blueKey]),
+  "sensitiveTbrs",
+];
+const JUNE_PITCH_KEYS = ["mfPitch","sensitiveTbrsPitch"];
+
+const MONTHS = {
+  "may-2025": {
+    label: "May 2025",
+    products: [
+      { key:"sensitiveSold",  label:"Sensitive TP", color:"#a78bfa", pitchKey:"sensitivePitch",  hasPitch:true  },
+      { key:"superFlexiSold", label:"Super Flexi",  color:"#5ecfea", pitchKey:"superFlexiPitch", hasPitch:true  },
+      { key:"cdc200Ordered",  label:"CDC 200g",     color:"#fb923c", pitchKey:"cdcPitch",        hasPitch:true  },
+    ],
+    statTiles: ["sensitiveSold","superFlexiSold","cdc200Ordered"],
+  },
+  "june-2025": {
+    label: "June 2025",
+    // products list used for summary rows and pitch tables
+    // For June, rendering is custom (MF variants + TBRS)
+    products: [
+      { key:"sensitiveTbrs", label:"Sensitive TBRS", color:"#a78bfa", pitchKey:"sensitiveTbrsPitch", hasPitch:true },
+    ],
+    mfVariants: MF_VARIANTS,
+    statTiles: [], // handled separately for June
+  },
+};
+
+const CURRENT_MONTH = "june-2025";
 
 const C = {
   bg:"#07090f", card:"#0d1019", card2:"#111520", border:"#1a2133",
   dim:"#1e2a3a", muted:"#485570", text:"#dce6f8",
   accent:"#4f8ef7", green:"#2dd4a0", amber:"#f5a623",
   red:"#f06a6a", purple:"#a78bfa", cyan:"#5ecfea", orange:"#fb923c",
+  redVariant:"#f06a6a", blueVariant:"#60a5fa",
 };
 
 const iS = {
@@ -23,15 +67,53 @@ const iS = {
   fontFamily:"inherit", outline:"none", width:"100%", boxSizing:"border-box",
 };
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function getMonthCfg(day) {
+  return MONTHS[day.month] || MONTHS["may-2025"];
+}
+
+function emptyJuneFields() {
+  const f = {};
+  JUNE_KEYS.forEach(k => { f[k] = null; });
+  JUNE_PITCH_KEYS.forEach(k => { f[k] = null; });
+  return f;
+}
+
+function emptyMayFields() {
+  return {
+    sensitiveSold:null, superFlexiSold:null, cdc200Ordered:null,
+    sensitivePitch:null, superFlexiPitch:null, cdcPitch:null,
+  };
+}
+
+// Count total MF units sold at a store (all Red+Blue variants)
+function storeMfCount(store) {
+  return MF_VARIANTS.reduce((n,v) => n + (store[v.redKey]===true?1:0) + (store[v.blueKey]===true?1:0), 0);
+}
+
 // ─── Seeds ────────────────────────────────────────────────────────────────────
 function mkS(name,type,visited,order,sensitive,flexi,cdc,smt,smile,notes,sPitch,fPitch,cPitch) {
- return { id:uid(), name, type, visited, orderPlaced:order,
+  return {
+    id:uid(), name, type, visited, orderPlaced:order, month:"may-2025",
     sensitiveSold:sensitive, superFlexiSold:flexi, cdc200Ordered:cdc,
-    smt_contract:smt, smileGoal:smile, notes:notes||"",
     sensitivePitch:sPitch||null, superFlexiPitch:fPitch||null, cdcPitch:cPitch||null,
+    smt_contract:smt, smileGoal:smile, notes:notes||"",
     notOnVisit:false, notOnVisitReason:"",
-    noOrderReason:"", noOrderReasonOther:"" };
+    noOrderReason:"", noOrderReasonOther:"",
+  };
 }
+
+function mkJ(name, type, visited, order, fields, smile, notes) {
+  return {
+    id:uid(), name, type, visited, orderPlaced:order, month:"june-2025",
+    smt_contract:null, smileGoal:smile??null, notes:notes||"",
+    notOnVisit:false, notOnVisitReason:"",
+    noOrderReason:"", noOrderReasonOther:"",
+    ...emptyJuneFields(),
+    ...fields,
+  };
+}
+
 const DAY3_STORES = [
   mkS("National dry","General Store",true,true,null,null,false,null,null,""),
   mkS("Noble medical","Medical Store",true,true,null,null,false,null,null,"Reorder the shelf for colgate visibility, sensitive stock was there"),
@@ -130,48 +212,95 @@ const DAY6_STORES = [
   mkS("Sakriya general store","General Store",true,true,null,null,null,null,null,""),
 ];
 
+// Day 14 — 4 June, Waseem Khan
+const DAY14_STORES = [
+  mkJ("Kamgar grocery","SMT",true,true,{mf20rsRed:true,mf80gBlue:true,mfTdpRed:true},null,"Blue 80"),
+  mkJ("Kamgar","SMT",true,true,{mf100gRed:true},null,""),
+  mkJ("New Maharashtra store","Kirana Store",true,true,{mf20rsRed:true,mfTdpRed:true},null,""),
+  mkJ("Laxmi medical","Medical Store",true,true,{sensitiveTbrs:true},null,""),
+  mkJ("Regal","General Store",true,true,{mf150gBlue:true},null,"Blue 150g"),
+  mkJ("Shah premchand kumbha","Medical Store",true,true,{mf20rsRed:true,mf80gRed:true,mf150gRed:true,mfTdpRed:true},null,""),
+  mkJ("Om medical","Medical Store",true,true,{mf150gRed:true,mf150gBlue:true,mf80gBlue:true},null,"MF 150 Red, Blue 150, Blue 80"),
+  mkJ("Bombay medical","Medical Store",true,false,{},null,"Delivery issue"),
+  mkJ("Welcome medical","Medical Store",true,true,{},null,""),
+  mkJ("Metro medical","Medical Store",true,true,{mf150gRed:true},null,""),
+  mkJ("Shah traders","General Store",true,true,{},null,""),
+  mkJ("Rashtra seva","General Store",true,true,{},null,""),
+  mkJ("Star soap","General Store",true,true,{},null,""),
+  mkJ("Mahim soap depot","General Store",true,true,{},null,""),
+  mkJ("Narayan kirana store","Kirana Store",true,true,{mf20rsRed:true},null,""),
+  mkJ("Royal","Medical Store",true,true,{mf20rsRed:true,mf150gRed:true},null,""),
+  mkJ("Sonal soap","Medical Store",true,true,{},null,""),
+  mkJ("Health forever","Medical Store",true,true,{},null,""),
+  mkJ("Labella medical","Medical Store",true,false,{},null,""),
+  mkJ("Ratanshi nenshi","Medical Store",true,true,{},null,""),
+  mkJ("Kranti grain","Kirana Store",true,true,{mf20rsRed:true,mf150gRed:true},null,""),
+  mkJ("Janta provision store","Kirana Store",true,false,{},null,""),
+  mkJ("Vipul traders","Medical Store",true,false,{},null,""),
+];
+
 const DEFAULT_DAYS = [
-  { id:"day-1", label:"Day 1", route:"", date:"", summaryOnly:true, smileGoalNote:"", smileGoalHit:null, dayNotes:"",
-    totals:{ visited:19,ordered:16,smtContracted:1,sensitiveTpOrdered:7,sensitiveTpMedical:2,medicalVisited:6,superFlexiOrdered:4,cdc200Ordered:0 }, stores:[] },
-  { id:"day-2", label:"Day 2", route:"", date:"", summaryOnly:true, smileGoalNote:"", smileGoalHit:null, dayNotes:"",
-    totals:{ visited:25,ordered:20,smtContracted:0,sensitiveTpOrdered:7,sensitiveTpMedical:5,medicalVisited:5,superFlexiOrdered:9,cdc200Ordered:0 }, stores:[] },
-  { id:"day-3", label:"Day 3", route:"Old Kharak", date:"15 May", summaryOnly:false, smileGoalNote:"", smileGoalHit:null,
-    dayNotes:"According to the DSR, Sensitive TP is not selling as much because of Sensodyne — their marketing is stronger in this area.",
-    stores:DAY3_STORES },
-  { id:"day-4", label:"Day 4", route:"", date:"16 May", summaryOnly:false, smileGoalNote:"", smileGoalHit:null,
-    dayNotes:"All medical stores shut at 1pm. DSR does not take order because delivery always ends up getting returned as shops are shut at 1pm.\n\nVery good effort on Super Flexi goal today.\n\nSensitive TP not great — few medical stores, either have stock already or it does not sell.",
-    stores:DAY4_STORES },
-  { id:"day-5", label:"Day 5", route:"", date:"19 May", summaryOnly:false, smileGoalNote:"", smileGoalHit:true,
-    dayNotes:"Heavy medical coverage day. Multiple wholesalers visited. Strong smile goal performance across stores. CDC pushed well — Abhay grain and Neemchand both converted SF+CDC.",
-    stores:DAY5_STORES },
-  { id:"day-6", label:"Day 6", route:"", date:"20 May", summaryOnly:false, smileGoalNote:"", smileGoalHit:true,
-    dayNotes:"100% conversion day — all 10 visited placed orders. Super Flexi was the star product. No Sensitive TP or CDC orders today. Strong smile goal performance.",
-    stores:DAY6_STORES },
+  { id:"day-1",  label:"Day 1",  route:"",          date:"",       month:"may-2025", summaryOnly:true,  dayNotes:"", totals:{ visited:19,ordered:16,smtContracted:1,sensitiveTpOrdered:7,sensitiveTpMedical:2,medicalVisited:6,superFlexiOrdered:4,cdc200Ordered:0 }, stores:[] },
+  { id:"day-2",  label:"Day 2",  route:"",          date:"",       month:"may-2025", summaryOnly:true,  dayNotes:"", totals:{ visited:25,ordered:20,smtContracted:0,sensitiveTpOrdered:7,sensitiveTpMedical:5,medicalVisited:5,superFlexiOrdered:9,cdc200Ordered:0 }, stores:[] },
+  { id:"day-3",  label:"Day 3",  route:"Old Kharak",date:"15 May", month:"may-2025", summaryOnly:false, dayNotes:"According to the DSR, Sensitive TP is not selling as much because of Sensodyne — their marketing is stronger in this area.", stores:DAY3_STORES },
+  { id:"day-4",  label:"Day 4",  route:"",          date:"16 May", month:"may-2025", summaryOnly:false, dayNotes:"All medical stores shut at 1pm. DSR does not take order because delivery always ends up getting returned.\n\nVery good effort on Super Flexi goal today.\n\nSensitive TP not great — few medical stores, either have stock already or it does not sell.", stores:DAY4_STORES },
+  { id:"day-5",  label:"Day 5",  route:"",          date:"19 May", month:"may-2025", summaryOnly:false, dayNotes:"Heavy medical coverage day. Multiple wholesalers visited. Strong smile goal performance. CDC pushed well — Abhay grain and Neemchand both converted SF+CDC.", stores:DAY5_STORES },
+  { id:"day-6",  label:"Day 6",  route:"",          date:"20 May", month:"may-2025", summaryOnly:false, dayNotes:"100% conversion day — all 10 visited placed orders. Super Flexi was the star product.", stores:DAY6_STORES },
+  { id:"day-14", label:"Day 14", route:"",          date:"4 Jun",  month:"june-2025",summaryOnly:false, dayNotes:"DSR: Waseem Khan", stores:DAY14_STORES },
 ];
 
 // ─── Stats ────────────────────────────────────────────────────────────────────
 function dayStats(day) {
   if (day.summaryOnly) {
     const t = day.totals;
-    return { visited:t.visited, ordered:t.ordered, medVisited:t.medicalVisited,
+    return {
+      visited:t.visited, ordered:t.ordered, medVisited:t.medicalVisited,
       sensitiveTpOrdered:t.sensitiveTpOrdered, sensitiveTpMedical:t.sensitiveTpMedical,
       superFlexi:t.superFlexiOrdered, cdc200:t.cdc200Ordered,
       smtTotal:t.smtContracted, smtContracted:t.smtContracted,
-      noOrder:t.visited-t.ordered, total:t.visited };
+      noOrder:t.visited-t.ordered, total:t.visited,
+      productCounts:{}, mfTotal:0, mfByVariant:{},
+    };
   }
   const s = day.stores;
   const vis = s.filter(x=>x.visited);
   const med = s.filter(x=>isMedical(x.type));
   const smts = s.filter(x=>isSMT(x.type));
+
+  if (day.month === "june-2025") {
+    const mfByVariant = {};
+    MF_VARIANTS.forEach(v => {
+      mfByVariant[v.redKey]  = s.filter(x=>x[v.redKey]===true).length;
+      mfByVariant[v.blueKey] = s.filter(x=>x[v.blueKey]===true).length;
+    });
+    const mfTotal = Object.values(mfByVariant).reduce((a,b)=>a+b,0);
+    const tbrsSold = s.filter(x=>x.sensitiveTbrs===true).length;
+    return {
+      visited:vis.length, ordered:s.filter(x=>x.orderPlaced).length, total:s.length,
+      medVisited:med.filter(x=>x.visited).length,
+      smtTotal:smts.length, smtContracted:smts.filter(x=>x.smt_contract===true).length,
+      noOrder:vis.filter(x=>!x.orderPlaced).length,
+      mfTotal, mfByVariant, tbrsSold,
+      productCounts:{ mfTotal, sensitiveTbrs:tbrsSold },
+    };
+  }
+
+  // May
+  const productCounts = {
+    sensitiveSold:  s.filter(x=>x.sensitiveSold===true).length,
+    superFlexiSold: s.filter(x=>x.superFlexiSold===true).length,
+    cdc200Ordered:  s.filter(x=>x.cdc200Ordered===true).length,
+  };
   return {
     visited:vis.length, ordered:s.filter(x=>x.orderPlaced).length, total:s.length,
     medVisited:med.filter(x=>x.visited).length,
-    sensitiveTpOrdered:s.filter(x=>x.sensitiveSold===true).length,
+    sensitiveTpOrdered:productCounts.sensitiveSold,
     sensitiveTpMedical:med.filter(x=>x.sensitiveSold===true).length,
-    superFlexi:s.filter(x=>x.superFlexiSold===true).length,
-    cdc200:s.filter(x=>x.cdc200Ordered===true).length,
+    superFlexi:productCounts.superFlexiSold,
+    cdc200:productCounts.cdc200Ordered,
     smtTotal:smts.length, smtContracted:smts.filter(x=>x.smt_contract===true).length,
     noOrder:vis.filter(x=>!x.orderPlaced).length,
+    productCounts, mfTotal:0, mfByVariant:{},
   };
 }
 
@@ -186,6 +315,24 @@ function pitchConversion(stores, productField, pitchField) {
     if (results[pitch]) {
       results[pitch].pitched++;
       if (s[productField] === true) results[pitch].converted++;
+    }
+  });
+  return results;
+}
+
+function mfPitchConversion(stores, pitchField) {
+  // converted = store sold at least one MF variant
+  const results = {};
+  PITCH_POSITIONS.forEach(pos => { results[pos] = { pitched:0, converted:0 }; });
+  results[NO_PITCH] = { count:0 };
+  stores.forEach(s => {
+    const pitch = s[pitchField];
+    if (!pitch) return;
+    const sold = storeMfCount(s) > 0;
+    if (pitch === NO_PITCH) { results[NO_PITCH].count++; return; }
+    if (results[pitch]) {
+      results[pitch].pitched++;
+      if (sold) results[pitch].converted++;
     }
   });
   return results;
@@ -219,8 +366,10 @@ function Pill({ label, on, onClick, color }) {
 }
 function Tri({ label, val, onChange, color }) {
   const c = color||C.accent;
-  const cfg = val===null ? { icon:"?", txt:"–", col:C.muted, bg:C.card2, bdr:C.border }
-    : val ? { icon:"✓", txt:"Yes", col:c, bg:`${c}18`, bdr:`${c}40` }
+  const cfg = val===null
+    ? { icon:"?", txt:"–", col:C.muted, bg:C.card2, bdr:C.border }
+    : val
+    ? { icon:"✓", txt:"Yes", col:c, bg:`${c}18`, bdr:`${c}40` }
     : { icon:"✗", txt:"No", col:C.red, bg:`${C.red}10`, bdr:`${C.red}35` };
   return (
     <button onClick={()=>onChange(val===null?true:val?false:null)} style={{ background:cfg.bg, border:`1.5px solid ${cfg.bdr}`, borderRadius:99, color:cfg.col, padding:"9px 18px", fontSize:14, cursor:"pointer", fontFamily:"inherit", display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
@@ -241,8 +390,8 @@ function SmileToggle({ val, onChange }) {
     </div>
   );
 }
-function PitchSelector({ label, productVal, pitchVal, onChangePitch, color }) {
-  if (productVal === null) return null;
+function PitchSelector({ label, active, pitchVal, onChangePitch, color }) {
+  if (!active) return null;
   const c = color||C.accent;
   return (
     <div style={{ marginTop:8, paddingLeft:4 }}>
@@ -250,10 +399,10 @@ function PitchSelector({ label, productVal, pitchVal, onChangePitch, color }) {
       <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
         {[...PITCH_POSITIONS, NO_PITCH].map(pos => {
           const isNoPitch = pos === NO_PITCH;
-          const active = pitchVal === pos;
+          const isActive = pitchVal === pos;
           const btnColor = isNoPitch ? C.dim : c;
           return (
-            <button key={pos} onClick={()=>onChangePitch(active?null:pos)} style={{ background:active?`${btnColor}20`:C.card2, border:`1.5px solid ${active?btnColor:C.border}`, borderRadius:99, color:active?btnColor:C.muted, padding:"7px 15px", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>
+            <button key={pos} onClick={()=>onChangePitch(isActive?null:pos)} style={{ background:isActive?`${btnColor}20`:C.card2, border:`1.5px solid ${isActive?btnColor:C.border}`, borderRadius:99, color:isActive?btnColor:C.muted, padding:"7px 15px", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>
               {isNoPitch ? "🤝 No pitch needed" : pos}
             </button>
           );
@@ -263,8 +412,8 @@ function PitchSelector({ label, productVal, pitchVal, onChangePitch, color }) {
     </div>
   );
 }
-function PitchTable({ title, stores, productField, pitchField, color }) {
-  const data = pitchConversion(stores, productField, pitchField);
+function PitchTable({ title, stores, productField, pitchField, color, isMf }) {
+  const data = isMf ? mfPitchConversion(stores, pitchField) : pitchConversion(stores, productField, pitchField);
   const pitchedTotal = PITCH_POSITIONS.reduce((s,p)=>s+data[p].pitched,0);
   const noPitchCount = data[NO_PITCH]?.count || 0;
   if (pitchedTotal === 0 && noPitchCount === 0) return null;
@@ -298,88 +447,145 @@ function PitchTable({ title, stores, productField, pitchField, color }) {
   );
 }
 
+// ─── MF Variant Row (Option B grouped UI) ────────────────────────────────────
+function MFVariantRow({ sizeLabel, redKey, blueKey, store, set }) {
+  const redVal  = store[redKey]  ?? null;
+  const blueVal = store[blueKey] ?? null;
+  return (
+    <div style={{ background:C.card2, border:`1px solid ${C.border}`, borderRadius:10, padding:"10px 12px", marginBottom:8 }}>
+      <div style={{ fontSize:12, color:C.muted, marginBottom:8, fontWeight:600 }}>{sizeLabel}</div>
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+        <Tri label="🔴 Red" val={redVal}  onChange={v=>set({[redKey]:v})}  color={C.redVariant} />
+        <Tri label="🔵 Blue" val={blueVal} onChange={v=>set({[blueKey]:v})} color={C.blueVariant} />
+      </div>
+    </div>
+  );
+}
+
 // ─── Store Card ───────────────────────────────────────────────────────────────
 function StoreCard({ store, onChange, onDelete }) {
   const [open, setOpen] = useState(false);
   const set = patch => onChange({ ...store, ...patch });
- const borderColor = store.notOnVisit ? C.dim : store.visited ? (store.orderPlaced?C.green:C.amber) : C.border;
+  const borderColor = store.notOnVisit ? C.dim : store.visited ? (store.orderPlaced?C.green:C.amber) : C.border;
+  const isJune = store.month === "june-2025";
+  const mfSold = isJune ? storeMfCount(store) : 0;
+  const anyMfPitched = isJune && (store.mfPitch !== null);
+
   return (
-    <div style={{ background:C.card, border:`2px solid ${borderColor}`, borderRadius:14, marginBottom:10, overflow:"hidden" }}>
+    <div style={{ background:C.card, border:`2px solid ${borderColor}`, borderRadius:14, marginBottom:10, overflow:"hidden", transition:"border-color .3s" }}>
       <div onClick={()=>setOpen(o=>!o)} style={{ padding:"13px 15px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer", userSelect:"none" }}>
         <div style={{ flex:1, minWidth:0 }}>
           <div style={{ fontWeight:700, fontSize:15, color:C.text, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{store.name||"Unnamed store"}</div>
           <div style={{ display:"flex", gap:7, marginTop:3, flexWrap:"wrap" }}>
             <span style={{ fontSize:11, color:C.muted, background:C.bg, border:`1px solid ${C.border}`, borderRadius:5, padding:"1px 7px" }}>{store.type}</span>
-            {store.visited && <span style={{ fontSize:11, color:C.accent }}>✓ visited</span>}
+            {store.notOnVisit && <span style={{ fontSize:11, color:C.dim }}>✗ not visiting</span>}
+            {!store.notOnVisit && store.visited && <span style={{ fontSize:11, color:C.accent }}>✓ visited</span>}
             {store.orderPlaced && <span style={{ fontSize:11, color:C.green }}>✓ order</span>}
-            {store.cdc200Ordered===true && <span style={{ fontSize:11, color:C.orange }}>✓ CDC</span>}
+            {isJune && mfSold>0 && <span style={{ fontSize:11, color:C.accent }}>MF:{mfSold}</span>}
+            {isJune && store.sensitiveTbrs===true && <span style={{ fontSize:11, color:C.purple }}>✓ TBRS</span>}
             {store.smileGoal===true && <span style={{ fontSize:13 }}>😊</span>}
             {store.smileGoal===false && <span style={{ fontSize:13 }}>😞</span>}
           </div>
         </div>
         <span style={{ color:C.muted, fontSize:20, marginLeft:10 }}>{open?"⌄":"›"}</span>
       </div>
+
       {open && (
         <div style={{ padding:"0 15px 16px", borderTop:`1px solid ${C.dim}` }}>
           <SLabel text="Store Name" />
           <input value={store.name} onChange={e=>set({name:e.target.value})} placeholder="Store name…" style={iS} />
+
           <SLabel text="Store Type" />
           <select value={store.type} onChange={e=>set({type:e.target.value})} style={{ ...iS, color:C.text }}>
             {STORE_TYPES.map(t=><option key={t} style={{ background:C.bg }}>{t}</option>)}
           </select>
+
           <SLabel text="Status" />
-<div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-  <Pill label="Visited" on={store.visited} onClick={()=>set({visited:!store.visited, notOnVisit:false})} color={C.accent} />
-  <Pill label="Order Placed" on={store.orderPlaced} onClick={()=>set({orderPlaced:!store.orderPlaced})} color={C.green} />
-  <Pill label="Not visiting" on={store.notOnVisit} onClick={()=>set({notOnVisit:!store.notOnVisit, visited:false, orderPlaced:false})} color={C.red} />
-</div>
-{store.notOnVisit && (
-  <textarea value={store.notOnVisitReason||""} onChange={e=>set({notOnVisitReason:e.target.value})} placeholder="Why not visiting this store?" rows={2} style={{ ...iS, resize:"vertical", lineHeight:1.6, marginTop:8, border:`1px solid ${C.red}40` }} />
-)}
-          <SLabel text="Products" />
           <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-            <Tri label="Sensitive TP" val={store.sensitiveSold} onChange={v=>set({sensitiveSold:v,sensitivePitch:v===null?null:store.sensitivePitch})} color={C.purple} />
-            <Tri label="Super Flexi" val={store.superFlexiSold} onChange={v=>set({superFlexiSold:v,superFlexiPitch:v===null?null:store.superFlexiPitch})} color={C.cyan} />
-            <Tri label="CDC 200g" val={store.cdc200Ordered} onChange={v=>set({cdc200Ordered:v,cdcPitch:v===null?null:store.cdcPitch})} color={C.orange} />
-            {isSMT(store.type) && <Tri label="Contract" val={store.smt_contract} onChange={v=>set({smt_contract:v})} color={C.amber} />}
+            <Pill label="Visited" on={store.visited} onClick={()=>set({visited:!store.visited, notOnVisit:false})} color={C.accent} />
+            <Pill label="Order Placed" on={store.orderPlaced} onClick={()=>set({orderPlaced:!store.orderPlaced})} color={C.green} />
+            <Pill label="Not visiting" on={store.notOnVisit} onClick={()=>set({notOnVisit:!store.notOnVisit, visited:false, orderPlaced:false})} color={C.red} />
           </div>
-          <div style={{ background:C.bg, border:`1px solid ${C.dim}`, borderRadius:10, padding:"10px 12px", marginTop:10 }}>
-            <div style={{ fontSize:11, color:C.muted, letterSpacing:1.5, textTransform:"uppercase", marginBottom:4 }}>📍 Pitch Timing</div>
-            <PitchSelector label="Sensitive TP" productVal={store.sensitiveSold} pitchVal={store.sensitivePitch} onChangePitch={v=>set({sensitivePitch:v})} color={C.purple} />
-            <PitchSelector label="Super Flexi" productVal={store.superFlexiSold} pitchVal={store.superFlexiPitch} onChangePitch={v=>set({superFlexiPitch:v})} color={C.cyan} />
-            <PitchSelector label="CDC 200g" productVal={store.cdc200Ordered} pitchVal={store.cdcPitch} onChangePitch={v=>set({cdcPitch:v})} color={C.orange} />
-            {store.sensitiveSold===null && store.superFlexiSold===null && store.cdc200Ordered===null && (
-              <div style={{ fontSize:12, color:C.dim, padding:"4px 0" }}>Set a product above to log pitch timing.</div>
-            )}
-          </div>
+          {store.notOnVisit && (
+            <textarea value={store.notOnVisitReason||""} onChange={e=>set({notOnVisitReason:e.target.value})} placeholder="Why not visiting this store?" rows={2} style={{ ...iS, resize:"vertical", lineHeight:1.6, marginTop:8, border:`1px solid ${C.red}40` }} />
+          )}
+
+          {/* ── June Products ── */}
+          {isJune && (
+            <>
+              <SLabel text="Max Fresh" />
+              {MF_VARIANTS.map(v => (
+                <MFVariantRow key={v.redKey} sizeLabel={v.sizeLabel} redKey={v.redKey} blueKey={v.blueKey} store={store} set={set} />
+              ))}
+              <div style={{ background:C.bg, border:`1px solid ${C.dim}`, borderRadius:10, padding:"10px 12px", marginTop:4, marginBottom:4 }}>
+                <div style={{ fontSize:11, color:C.muted, letterSpacing:1.5, textTransform:"uppercase", marginBottom:4 }}>📍 MF Pitch Timing</div>
+                <PitchSelector label="Max Fresh" active={true} pitchVal={store.mfPitch||null} onChangePitch={v=>set({mfPitch:v})} color={C.accent} />
+              </div>
+
+              <SLabel text="Sensitive TBRS" />
+              <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                <Tri label="Sensitive TBRS" val={store.sensitiveTbrs??null} onChange={v=>set({sensitiveTbrs:v, sensitiveTbrsPitch:v===null?null:store.sensitiveTbrsPitch})} color={C.purple} />
+              </div>
+              {(store.sensitiveTbrs??null) !== null && (
+                <div style={{ background:C.bg, border:`1px solid ${C.dim}`, borderRadius:10, padding:"10px 12px", marginTop:8 }}>
+                  <div style={{ fontSize:11, color:C.muted, letterSpacing:1.5, textTransform:"uppercase", marginBottom:4 }}>📍 TBRS Pitch Timing</div>
+                  <PitchSelector label="Sensitive TBRS" active={true} pitchVal={store.sensitiveTbrsPitch||null} onChangePitch={v=>set({sensitiveTbrsPitch:v})} color={C.purple} />
+                </div>
+              )}
+            </>
+          )}
+
+          {/* ── May Products ── */}
+          {!isJune && (
+            <>
+              <SLabel text="Products" />
+              <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                <Tri label="Sensitive TP" val={store.sensitiveSold??null} onChange={v=>set({sensitiveSold:v, sensitivePitch:v===null?null:store.sensitivePitch})} color={C.purple} />
+                <Tri label="Super Flexi"  val={store.superFlexiSold??null} onChange={v=>set({superFlexiSold:v, superFlexiPitch:v===null?null:store.superFlexiPitch})} color={C.cyan} />
+                <Tri label="CDC 200g"     val={store.cdc200Ordered??null} onChange={v=>set({cdc200Ordered:v, cdcPitch:v===null?null:store.cdcPitch})} color={C.orange} />
+                {isSMT(store.type) && <Tri label="Contract" val={store.smt_contract} onChange={v=>set({smt_contract:v})} color={C.amber} />}
+              </div>
+              {(store.sensitiveSold!==null || store.superFlexiSold!==null || store.cdc200Ordered!==null) && (
+                <div style={{ background:C.bg, border:`1px solid ${C.dim}`, borderRadius:10, padding:"10px 12px", marginTop:10 }}>
+                  <div style={{ fontSize:11, color:C.muted, letterSpacing:1.5, textTransform:"uppercase", marginBottom:4 }}>📍 Pitch Timing</div>
+                  <PitchSelector label="Sensitive TP" active={store.sensitiveSold!==null} pitchVal={store.sensitivePitch} onChangePitch={v=>set({sensitivePitch:v})} color={C.purple} />
+                  <PitchSelector label="Super Flexi"  active={store.superFlexiSold!==null} pitchVal={store.superFlexiPitch} onChangePitch={v=>set({superFlexiPitch:v})} color={C.cyan} />
+                  <PitchSelector label="CDC 200g"     active={store.cdc200Ordered!==null} pitchVal={store.cdcPitch} onChangePitch={v=>set({cdcPitch:v})} color={C.orange} />
+                </div>
+              )}
+            </>
+          )}
+
           <SLabel text="😊 Smile Goal" />
           <SmileToggle val={store.smileGoal} onChange={v=>set({smileGoal:v})} />
-          {store.visited && !store.orderPlaced && (
-  <div style={{ marginTop:10 }}>
-    <SLabel text="Why no order?" />
-    <select
-      value={store.noOrderReason||""}
-      onChange={e=>set({noOrderReason:e.target.value, noOrderReasonOther:""})}
-      style={{ ...iS, color:store.noOrderReason?C.text:C.muted }}
-    >
-      <option value="">Select reason…</option>
-      <option value="Enough stock">Enough stock</option>
-      <option value="Owner not present">Owner not present</option>
-      <option value="Shop closed / on strike">Shop closed / on strike</option>
-      <option value="Delivery timing conflict">Delivery timing conflict (holiday/festive)</option>
-      <option value="Out of stock at distributor">Out of stock at distributor</option>
-      <option value="Price / margin issue">Price / margin issue</option>
-      <option value="Other">Other</option>
-    </select>
-    {store.noOrderReason === "Other" && (
-      <textarea value={store.noOrderReasonOther||""} onChange={e=>set({noOrderReasonOther:e.target.value})} placeholder="Describe reason…" rows={2} style={{ ...iS, resize:"vertical", lineHeight:1.6, marginTop:6 }} />
-    )}
-  </div>
-)}
 
-<SLabel text="Store Notes" />
-<textarea value={store.notes} onChange={e=>set({notes:e.target.value})} placeholder="Any notes…" rows={2} style={{ ...iS, resize:"vertical", lineHeight:1.6 }} />
-          <button onClick={()=>onDelete(store.id)} style={{ background:`${C.red}15`, border:`1px solid ${C.red}40`, borderRadius:10, color:C.red, padding:"10px 0", fontSize:13, cursor:"pointer", fontFamily:"inherit", width:"100%", marginTop:14 }}>Delete Store</button>
+          {store.visited && !store.orderPlaced && (
+            <div style={{ marginTop:10 }}>
+              <SLabel text="Why no order?" />
+              <select value={store.noOrderReason||""} onChange={e=>set({noOrderReason:e.target.value, noOrderReasonOther:""})}
+                style={{ ...iS, color:store.noOrderReason?C.text:C.muted }}>
+                <option value="">Select reason…</option>
+                <option value="Enough stock">Enough stock</option>
+                <option value="Owner not present">Owner not present</option>
+                <option value="Shop closed / on strike">Shop closed / on strike</option>
+                <option value="Delivery timing conflict">Delivery timing conflict (holiday/festive)</option>
+                <option value="Out of stock at distributor">Out of stock at distributor</option>
+                <option value="Price / margin issue">Price / margin issue</option>
+                <option value="Other">Other</option>
+              </select>
+              {store.noOrderReason === "Other" && (
+                <textarea value={store.noOrderReasonOther||""} onChange={e=>set({noOrderReasonOther:e.target.value})}
+                  placeholder="Describe reason…" rows={2} style={{ ...iS, resize:"vertical", lineHeight:1.6, marginTop:6 }} />
+              )}
+            </div>
+          )}
+
+          <SLabel text="Store Notes" />
+          <textarea value={store.notes} onChange={e=>set({notes:e.target.value})} placeholder="Any notes…" rows={2} style={{ ...iS, resize:"vertical", lineHeight:1.6 }} />
+
+          <button onClick={()=>onDelete(store.id)} style={{ background:`${C.red}15`, border:`1px solid ${C.red}40`, borderRadius:10, color:C.red, padding:"10px 0", fontSize:13, cursor:"pointer", fontFamily:"inherit", width:"100%", marginTop:14 }}>
+            Delete Store
+          </button>
         </div>
       )}
     </div>
@@ -389,9 +595,11 @@ function StoreCard({ store, onChange, onDelete }) {
 // ─── Day Summary ──────────────────────────────────────────────────────────────
 function DaySummary({ day }) {
   const st = dayStats(day);
+  const isJune = day.month === "june-2025";
   const hit = st.ordered >= DAILY_TARGET;
   const smileY = day.stores.filter(s=>s.smileGoal===true).length;
   const smileN = day.stores.filter(s=>s.smileGoal===false).length;
+
   return (
     <div>
       <div style={{ background:hit?`${C.green}08`:`${C.amber}08`, border:`2px solid ${hit?C.green:C.amber}30`, borderRadius:14, padding:18, marginBottom:18, textAlign:"center" }}>
@@ -399,90 +607,199 @@ function DaySummary({ day }) {
         <div style={{ fontSize:18, fontWeight:800, color:hit?C.green:C.amber, marginTop:6 }}>{hit?"Target Hit!":"Target Not Reached"}</div>
         <div style={{ fontSize:13, color:C.muted, marginTop:4 }}>{st.ordered} / {DAILY_TARGET} bill cuts</div>
       </div>
+
       <SHead title="Coverage" />
       <SRow label="Stores on route" val={st.total||"—"} />
       <SRow label="Visited" val={st.visited} color={C.accent} />
       <SRow label="Orders placed" val={`${st.ordered} / ${st.visited}`} color={C.green} />
       <SRow label="No order" val={st.noOrder} color={st.noOrder>0?C.amber:C.green} />
-      <SHead title="GTM Products" color={C.purple} />
-      <SRow label="Sensitive TP ordered" val={st.sensitiveTpOrdered} color={C.purple} />
-      <SRow label="  of which medical" val={`${st.sensitiveTpMedical}/${st.medVisited} med visited`} color={C.purple} sub="GTM target" />
-      <SRow label="Super Flexi ordered" val={`${st.superFlexi}/${st.visited}`} color={C.cyan} />
-      <SRow label="CDC 200g ordered" val={st.cdc200} color={C.orange} />
-      {st.smtTotal>0 && (<><SHead title="SMT" color={C.amber} /><SRow label="Contracted" val={`${st.smtContracted}/${st.smtTotal}`} color={C.amber} /></>)}
+
+      {isJune ? (
+        <>
+          <SHead title="Max Fresh (MF TDP)" color={C.accent} />
+          <SRow label="Total MF units sold" val={st.mfTotal} color={C.accent} />
+          {MF_VARIANTS.map(v => (
+            <div key={v.redKey}>
+              <SRow label={`${v.sizeLabel} — Red`}  val={st.mfByVariant?.[v.redKey]||0}  color={C.redVariant} />
+              <SRow label={`${v.sizeLabel} — Blue`} val={st.mfByVariant?.[v.blueKey]||0} color={C.blueVariant} />
+            </div>
+          ))}
+          <SHead title="Sensitive TBRS" color={C.purple} />
+          <SRow label="Sensitive TBRS sold" val={st.tbrsSold||0} color={C.purple} />
+        </>
+      ) : (
+        <>
+          <SHead title="GTM Products" color={C.purple} />
+          <SRow label="Sensitive TP ordered" val={st.sensitiveTpOrdered||0} color={C.purple} />
+          <SRow label="  of which medical"   val={`${st.sensitiveTpMedical||0}/${st.medVisited} med visited`} color={C.purple} sub="GTM target" />
+          <SRow label="Super Flexi ordered"  val={`${st.superFlexi||0}/${st.visited}`} color={C.cyan} />
+          <SRow label="CDC 200g ordered"     val={st.cdc200||0} color={C.orange} />
+        </>
+      )}
+
+      {st.smtTotal>0 && (
+        <>
+          <SHead title="SMT" color={C.amber} />
+          <SRow label="Contracted" val={`${st.smtContracted}/${st.smtTotal}`} color={C.amber} />
+        </>
+      )}
+
       <SHead title="😊 Smile Goal" color={C.amber} />
       {smileY+smileN>0
         ? <><SRow label="Achieved" val={smileY} color={C.green} /><SRow label="Missed" val={smileN} color={C.red} /></>
-        : <div style={{ fontSize:13, color:C.dim, padding:"10px 0" }}>Mark smile goal on each store card.</div>}
-      {!day.summaryOnly && day.stores.length>0 && (<>
-        <SHead title="📍 Pitch Timing — Conversion Rates" color={C.accent} />
-        <PitchTable title="Sensitive TP" stores={day.stores} productField="sensitiveSold" pitchField="sensitivePitch" color={C.purple} />
-        <PitchTable title="Super Flexi" stores={day.stores} productField="superFlexiSold" pitchField="superFlexiPitch" color={C.cyan} />
-        <PitchTable title="CDC 200g" stores={day.stores} productField="cdc200Ordered" pitchField="cdcPitch" color={C.orange} />
-      </>)}
+        : <div style={{ fontSize:13, color:C.dim, padding:"10px 0" }}>Mark smile goal on each store card.</div>
+      }
+
+      {!day.summaryOnly && day.stores.length>0 && (
+        <>
+          <SHead title="📍 Pitch Timing — Conversion Rates" color={C.accent} />
+          {isJune ? (
+            <>
+              <PitchTable title="Max Fresh (all variants)" stores={day.stores} pitchField="mfPitch" color={C.accent} isMf={true} />
+              <PitchTable title="Sensitive TBRS" stores={day.stores} productField="sensitiveTbrs" pitchField="sensitiveTbrsPitch" color={C.purple} isMf={false} />
+            </>
+          ) : (
+            <>
+              <PitchTable title="Sensitive TP" stores={day.stores} productField="sensitiveSold"  pitchField="sensitivePitch"  color={C.purple} />
+              <PitchTable title="Super Flexi"  stores={day.stores} productField="superFlexiSold" pitchField="superFlexiPitch" color={C.cyan} />
+              <PitchTable title="CDC 200g"     stores={day.stores} productField="cdc200Ordered"  pitchField="cdcPitch"        color={C.orange} />
+            </>
+          )}
+        </>
+      )}
+
       {day.dayNotes ? (
         <div style={{ marginTop:18, background:C.card, border:`1px solid ${C.border}`, borderRadius:12, padding:"13px 15px" }}>
           <SHead title="📝 Day Notes" />
           <div style={{ fontSize:14, color:C.text, lineHeight:1.7, whiteSpace:"pre-wrap" }}>{day.dayNotes}</div>
         </div>
       ) : null}
-      {!day.summaryOnly && day.stores.length>0 && (<>
-        <SHead title="Store Breakdown" />
-        {day.stores.map(s => (
-          <div key={s.id} style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:10, padding:"10px 13px", marginBottom:8 }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-              <div>
-                <span style={{ fontSize:14, fontWeight:700, color:C.text }}>{s.name||"Unnamed"}</span>
-                <span style={{ fontSize:11, color:C.muted, marginLeft:7 }}>{s.type}</span>
+
+      {!day.summaryOnly && day.stores.length>0 && (
+        <>
+          <SHead title="Store Breakdown" />
+          {day.stores.map(s => {
+            const mf = storeMfCount(s);
+            return (
+              <div key={s.id} style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:10, padding:"10px 13px", marginBottom:8 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+                  <div>
+                    <span style={{ fontSize:14, fontWeight:700, color:C.text }}>{s.name||"Unnamed"}</span>
+                    <span style={{ fontSize:11, color:C.muted, marginLeft:7 }}>{s.type}</span>
+                  </div>
+                  {s.smileGoal!==null && <span style={{ fontSize:18 }}>{s.smileGoal?"😊":"😞"}</span>}
+                </div>
+                <div style={{ display:"flex", gap:5, flexWrap:"wrap", marginTop:6 }}>
+                  <span style={{ fontSize:11, padding:"2px 8px", borderRadius:6, background:s.visited?`${C.green}12`:`${C.red}10`, color:s.visited?C.green:C.red, border:`1px solid ${s.visited?`${C.green}30`:`${C.red}25`}` }}>{s.visited?"✓":"✗"} Visit</span>
+                  <span style={{ fontSize:11, padding:"2px 8px", borderRadius:6, background:s.orderPlaced?`${C.green}12`:`${C.red}10`, color:s.orderPlaced?C.green:C.red, border:`1px solid ${s.orderPlaced?`${C.green}30`:`${C.red}25`}` }}>{s.orderPlaced?"✓":"✗"} Order</span>
+                  {isJune && mf>0 && <span style={{ fontSize:11, padding:"2px 8px", borderRadius:6, background:`${C.accent}12`, color:C.accent, border:`1px solid ${C.accent}30` }}>MF: {mf}</span>}
+                  {isJune && s.sensitiveTbrs===true && <span style={{ fontSize:11, padding:"2px 8px", borderRadius:6, background:`${C.purple}12`, color:C.purple, border:`1px solid ${C.purple}30` }}>✓ TBRS</span>}
+                  {!isJune && [["Sensitive",s.sensitiveSold],["Flexi",s.superFlexiSold],["CDC",s.cdc200Ordered]].map(([l,v])=>(
+                    <span key={l} style={{ fontSize:11, padding:"2px 8px", borderRadius:6, background:v===null?C.card2:v?`${C.green}12`:`${C.red}10`, color:v===null?C.dim:v?C.green:C.red, border:`1px solid ${v===null?C.border:v?`${C.green}30`:`${C.red}25`}` }}>
+                      {v===null?"?":v?"✓":"✗"} {l}
+                    </span>
+                  ))}
+                </div>
+                {s.notes ? <div style={{ fontSize:12, color:C.dim, marginTop:6, lineHeight:1.5 }}>📝 {s.notes}</div> : null}
+                {s.noOrderReason ? <div style={{ fontSize:12, color:C.amber, marginTop:4 }}>⚠ {s.noOrderReason}</div> : null}
               </div>
-              {s.smileGoal!==null && <span style={{ fontSize:18 }}>{s.smileGoal?"😊":"😞"}</span>}
-            </div>
-            <div style={{ display:"flex", gap:5, flexWrap:"wrap", marginTop:6 }}>
-              {[["Visit",s.visited],["Order",s.orderPlaced],["Sensitive",s.sensitiveSold],["Flexi",s.superFlexiSold],["CDC",s.cdc200Ordered],...(isSMT(s.type)?[["Contract",s.smt_contract]]:[])].map(([l,v])=>(
-                <span key={l} style={{ fontSize:11, padding:"2px 8px", borderRadius:6, background:v===null||v===undefined?C.card2:v?`${C.green}12`:`${C.red}10`, color:v===null||v===undefined?C.dim:v?C.green:C.red, border:`1px solid ${v===null||v===undefined?C.border:v?`${C.green}30`:`${C.red}25`}` }}>
-                  {v===null||v===undefined?"?":v?"✓":"✗"} {l}
-                </span>
-              ))}
-            </div>
-            {s.notes ? <div style={{ fontSize:12, color:C.dim, marginTop:6, lineHeight:1.5 }}>📝 {s.notes}</div> : null}
-          </div>
-        ))}
-      </>)}
+            );
+          })}
+        </>
+      )}
     </div>
   );
 }
 
 // ─── Week View ────────────────────────────────────────────────────────────────
-function WeekView({ days }) {
-  const complete = days.filter(d=>dayStats(d).visited>0);
+function WeekView({ days, activeMonth }) {
+  const isJune = activeMonth === "june-2025";
+  const complete = days.filter(d=>d.month===activeMonth && dayStats(d).visited>0);
   const n = complete.length;
-  if (!n) return <div style={{ color:C.muted, textAlign:"center", padding:40, fontSize:14 }}>No data yet.</div>;
+  if (!n) return <div style={{ color:C.muted, textAlign:"center", padding:40, fontSize:14 }}>No data yet for {MONTHS[activeMonth].label}.</div>;
   const all = complete.map(dayStats);
-  const avg = f=>(all.reduce((s,x)=>s+(x[f]||0),0)/n).toFixed(1);
-  const sum = f=>all.reduce((s,x)=>s+(x[f]||0),0);
+  const sum = f => all.reduce((s,x)=>s+(x[f]||0),0);
+  const sumMfVariant = key => all.reduce((s,x)=>s+(x.mfByVariant?.[key]||0),0);
   const allStores = complete.filter(d=>!d.summaryOnly).flatMap(d=>d.stores);
+
   return (
     <div>
       <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:18 }}>
-        {[["Days",n,C.accent],["Visits",sum("visited"),C.accent],["Orders",sum("ordered"),C.green],["Sens",sum("sensitiveTpOrdered"),C.purple],["Flexi",sum("superFlexi"),C.cyan],["CDC",sum("cdc200"),C.orange]].map(([l,v,c])=>(
+        {isJune ? [
+          ["Days",   n,               C.accent],
+          ["Visits", sum("visited"),   C.accent],
+          ["Orders", sum("ordered"),   C.green],
+          ["MF TDP", sum("mfTotal"),   C.accent],
+          ["TBRS",   sum("tbrsSold"),  C.purple],
+        ] : [
+          ["Days",   n,                           C.accent],
+          ["Visits", sum("visited"),               C.accent],
+          ["Orders", sum("ordered"),               C.green],
+          ["Sens",   sum("sensitiveTpOrdered"),    C.purple],
+          ["Flexi",  sum("superFlexi"),            C.cyan],
+          ["CDC",    sum("cdc200"),                C.orange],
+        ].map(([l,v,c])=>(
+          <div key={l} style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:12, padding:"12px 8px", flex:1, minWidth:55, textAlign:"center" }}>
+            <div style={{ fontSize:9, color:C.muted, letterSpacing:1, textTransform:"uppercase", marginBottom:4 }}>{l}</div>
+            <div style={{ fontSize:20, fontWeight:900, color:c }}>{v}</div>
+          </div>
+        ))}
+        {isJune && [
+          ["Days",   n,               C.accent],
+          ["Visits", sum("visited"),   C.accent],
+          ["Orders", sum("ordered"),   C.green],
+          ["MF TDP", sum("mfTotal"),   C.accent],
+          ["TBRS",   sum("tbrsSold"),  C.purple],
+        ].map(([l,v,c])=>(
           <div key={l} style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:12, padding:"12px 8px", flex:1, minWidth:55, textAlign:"center" }}>
             <div style={{ fontSize:9, color:C.muted, letterSpacing:1, textTransform:"uppercase", marginBottom:4 }}>{l}</div>
             <div style={{ fontSize:20, fontWeight:900, color:c }}>{v}</div>
           </div>
         ))}
       </div>
-      <SHead title="Averages per day" />
-      <SRow label="Avg visited" val={avg("visited")} color={C.accent} />
-      <SRow label="Avg orders" val={avg("ordered")} color={C.green} />
-      <SRow label="Avg Sensitive TP" val={avg("sensitiveTpOrdered")} color={C.purple} />
-      <SRow label="Avg Super Flexi" val={avg("superFlexi")} color={C.cyan} />
-      <SRow label="Avg CDC 200g" val={avg("cdc200")} color={C.orange} />
-      {allStores.length>0 && (<>
-        <SHead title="📍 Pitch Timing — Weekly Analysis" color={C.accent} />
-        <PitchTable title="Sensitive TP" stores={allStores} productField="sensitiveSold" pitchField="sensitivePitch" color={C.purple} />
-        <PitchTable title="Super Flexi" stores={allStores} productField="superFlexiSold" pitchField="superFlexiPitch" color={C.cyan} />
-        <PitchTable title="CDC 200g" stores={allStores} productField="cdc200Ordered" pitchField="cdcPitch" color={C.orange} />
-      </>)}
+
+      {isJune && (
+        <>
+          <SHead title="MF Variant Breakdown" color={C.accent} />
+          {MF_VARIANTS.map(v=>(
+            <div key={v.redKey}>
+              <SRow label={`${v.sizeLabel} Red`}  val={sumMfVariant(v.redKey)}  color={C.redVariant} />
+              <SRow label={`${v.sizeLabel} Blue`} val={sumMfVariant(v.blueKey)} color={C.blueVariant} />
+            </div>
+          ))}
+          <SRow label="Sensitive TBRS" val={sum("tbrsSold")} color={C.purple} />
+        </>
+      )}
+
+      {!isJune && (
+        <>
+          <SHead title="Averages per day" />
+          <SRow label="Avg visited"       val={(sum("visited")/n).toFixed(1)}           color={C.accent} />
+          <SRow label="Avg orders"        val={(sum("ordered")/n).toFixed(1)}            color={C.green} />
+          <SRow label="Avg Sensitive TP"  val={(sum("sensitiveTpOrdered")/n).toFixed(1)} color={C.purple} />
+          <SRow label="Avg Super Flexi"   val={(sum("superFlexi")/n).toFixed(1)}         color={C.cyan} />
+          <SRow label="Avg CDC 200g"      val={(sum("cdc200")/n).toFixed(1)}             color={C.orange} />
+        </>
+      )}
+
+      {allStores.length>0 && (
+        <>
+          <SHead title="📍 Pitch Timing — Weekly Analysis" color={C.accent} />
+          {isJune ? (
+            <>
+              <PitchTable title="Max Fresh (all variants)" stores={allStores} pitchField="mfPitch" color={C.accent} isMf={true} />
+              <PitchTable title="Sensitive TBRS" stores={allStores} productField="sensitiveTbrs" pitchField="sensitiveTbrsPitch" color={C.purple} isMf={false} />
+            </>
+          ) : (
+            <>
+              <PitchTable title="Sensitive TP" stores={allStores} productField="sensitiveSold"  pitchField="sensitivePitch"  color={C.purple} />
+              <PitchTable title="Super Flexi"  stores={allStores} productField="superFlexiSold" pitchField="superFlexiPitch" color={C.cyan} />
+              <PitchTable title="CDC 200g"     stores={allStores} productField="cdc200Ordered"  pitchField="cdcPitch"        color={C.orange} />
+            </>
+          )}
+        </>
+      )}
+
       <SHead title="Day-by-Day" />
       {complete.map(d => {
         const st = dayStats(d);
@@ -494,12 +811,13 @@ function WeekView({ days }) {
               <span style={{ fontSize:13, color:hit?C.green:C.red, fontWeight:700 }}>{hit?"✓":"✗"} {st.ordered} orders</span>
             </div>
             {d.route && <div style={{ fontSize:12, color:C.muted, marginBottom:5 }}>📍 {d.route}</div>}
-            {d.date && <div style={{ fontSize:11, color:C.dim, marginBottom:5 }}>{d.date}</div>}
+            {d.date  && <div style={{ fontSize:11, color:C.dim,   marginBottom:5 }}>{d.date}</div>}
             <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
               <span style={{ fontSize:13, color:C.accent }}>{st.visited} visited</span>
-              <span style={{ fontSize:13, color:C.purple }}>{st.sensitiveTpOrdered} sens</span>
-              <span style={{ fontSize:13, color:C.cyan }}>{st.superFlexi} flexi</span>
-              <span style={{ fontSize:13, color:C.orange }}>{st.cdc200} CDC</span>
+              {isJune
+                ? <><span style={{ fontSize:13, color:C.accent }}>MF: {st.mfTotal}</span><span style={{ fontSize:13, color:C.purple }}>TBRS: {st.tbrsSold||0}</span></>
+                : <><span style={{ fontSize:13, color:C.purple }}>{st.sensitiveTpOrdered||0} sens</span><span style={{ fontSize:13, color:C.cyan }}>{st.superFlexi||0} flexi</span><span style={{ fontSize:13, color:C.orange }}>{st.cdc200||0} CDC</span></>
+              }
             </div>
           </div>
         );
@@ -511,6 +829,7 @@ function WeekView({ days }) {
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [days, setDays] = useState(null);
+  const [activeMonth, setActiveMonth] = useState("may-2025");
   const [idx, setIdx] = useState(0);
   const [tab, setTab] = useState("stores");
   const [saveStatus, setSaveStatus] = useState("loading");
@@ -522,7 +841,8 @@ export default function App() {
   useEffect(() => {
     loadFromSupabase(DEFAULT_DAYS).then(d => {
       setDays(d);
-      setIdx(d.length - 1);
+      const lastMay = [...d].map((x,i)=>({x,i})).filter(({x})=>x.month==="may-2025").pop();
+      setIdx(lastMay ? lastMay.i : d.length-1);
       setSaveStatus("saved");
     });
   }, []);
@@ -544,35 +864,69 @@ export default function App() {
     </div>
   );
 
+  const monthDays = days.filter(d=>d.month===activeMonth);
   const day = days[idx];
-  const st = dayStats(day);
-  const hit = st.ordered >= DAILY_TARGET;
-  const pct = Math.min((st.ordered/DAILY_TARGET)*100, 100);
+  const isJune = activeMonth === "june-2025";
+  const st = day ? dayStats(day) : null;
+  const hit = st ? st.ordered >= DAILY_TARGET : false;
+  const pct = st ? Math.min((st.ordered/DAILY_TARGET)*100, 100) : 0;
 
-  const updateDay = patch => commit(days.map((d,i)=>i===idx?{...d,...patch}:d));
+  const updateDay   = patch => commit(days.map((d,i)=>i===idx?{...d,...patch}:d));
   const updateStore = updated => commit(days.map((d,i)=>i!==idx?d:{...d,stores:d.stores.map(s=>s.id===updated.id?updated:s)}));
   const deleteStore = id => commit(days.map((d,i)=>i!==idx?d:{...d,stores:d.stores.filter(s=>s.id!==id)}));
+
   const addStore = () => {
-    const s = { id:uid(), name:newName, type:newType, visited:false, orderPlaced:false, sensitiveSold:null, superFlexiSold:null, cdc200Ordered:null, smt_contract:null, smileGoal:null, notes:"", sensitivePitch:null, superFlexiPitch:null, cdcPitch:null, notOnVisit:false, notOnVisitReason:"", noOrderReason:"", noOrderReasonOther:"" };
+    const productFields = isJune ? emptyJuneFields() : emptyMayFields();
+    const s = {
+      id:uid(), name:newName, type:newType, visited:false, orderPlaced:false,
+      month:activeMonth, smt_contract:null, smileGoal:null, notes:"",
+      notOnVisit:false, notOnVisitReason:"", noOrderReason:"", noOrderReasonOther:"",
+      ...productFields,
+    };
     commit(days.map((d,i)=>i!==idx?d:{...d,stores:[...d.stores,s]}));
     setNewName(""); setNewType("General Store"); setShowAdd(false);
   };
+
   const addDay = () => {
-    const nd = { id:uid(), label:`Day ${days.length+1}`, route:"", date:new Date().toLocaleDateString("en-IN",{day:"numeric",month:"short"}), summaryOnly:false, smileGoalNote:"", smileGoalHit:null, dayNotes:"", stores:[] };
+    const nd = {
+      id:uid(), label:`Day ${days.length+1}`, route:"",
+      date:new Date().toLocaleDateString("en-IN",{day:"numeric",month:"short"}),
+      month:activeMonth, summaryOnly:false, dayNotes:"", stores:[],
+    };
     const next = [...days, nd];
     commit(next); setIdx(next.length-1); setTab("stores");
   };
+
   const resetCheckins = () => {
     if (!window.confirm("Reset all check-ins? Names stay.")) return;
-    commit(days.map((d,i)=>i!==idx?d:{...d,stores:d.stores.map(s=>({...s,visited:false,orderPlaced:false,sensitiveSold:null,superFlexiSold:null,cdc200Ordered:null,smt_contract:null,smileGoal:null,notes:"",sensitivePitch:null,superFlexiPitch:null,cdcPitch:null,notOnVisit:false,notOnVisitReason:"",noOrderReason:"",noOrderReasonOther:""}))}));
+    const productFields = isJune ? emptyJuneFields() : emptyMayFields();
+    commit(days.map((d,i)=>i!==idx?d:{...d,stores:d.stores.map(s=>({
+      ...s, visited:false, orderPlaced:false, smt_contract:null, smileGoal:null,
+      notes:"", notOnVisit:false, notOnVisitReason:"", noOrderReason:"", noOrderReasonOther:"",
+      ...productFields,
+    }))}));
+  };
+
+  const handleMonthSwitch = m => {
+    setActiveMonth(m);
+    setTab("stores");
+    const mDays = days.map((d,i)=>({d,i})).filter(({d})=>d.month===m);
+    if (mDays.length > 0) setIdx(mDays[mDays.length-1].i);
   };
 
   const saveDotColor = saveStatus==="saved"?C.green:saveStatus==="saving"?C.amber:C.red;
   const saveDotLabel = saveStatus==="saved"?"☁ synced":saveStatus==="saving"?"syncing…":"⚠ sync error";
 
+  // stat tiles for stores view
+  const statTiles = isJune
+    ? [["Visited",st?.visited,`of ${day?.stores?.length||0}`,C.accent],["Orders",st?.ordered,`min ${DAILY_TARGET}`,hit?C.green:C.red],["MF",st?.mfTotal||0,"",C.accent],["TBRS",st?.tbrsSold||0,"",C.purple]]
+    : [["Visited",st?.visited,`of ${day?.stores?.length||0}`,C.accent],["Orders",st?.ordered,`min ${DAILY_TARGET}`,hit?C.green:C.red],["Flexi",st?.superFlexi||0,"",C.cyan],["Sens",st?.sensitiveTpOrdered||0,"",C.purple],["CDC",st?.cdc200||0,"",C.orange]];
+
   return (
     <div style={{ minHeight:"100vh", background:C.bg, color:C.text, fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif", padding:"16px 14px 80px", maxWidth:500, margin:"0 auto" }}>
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 }}>
+
+      {/* Header */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14 }}>
         <div>
           <div style={{ fontSize:10, color:C.accent, letterSpacing:3, textTransform:"uppercase", marginBottom:2 }}>Colgate · Field</div>
           <div style={{ fontSize:24, fontWeight:800, lineHeight:1 }}>Market Visits</div>
@@ -583,21 +937,35 @@ export default function App() {
         </div>
       </div>
 
-      <div style={{ display:"flex", gap:6, overflowX:"auto", paddingBottom:6, marginBottom:16, WebkitOverflowScrolling:"touch" }}>
-        {days.map((d,i) => (
-          <button key={d.id} onClick={()=>{setIdx(i);setTab("stores");}} style={{ background:idx===i&&tab!=="week"?C.accent:C.card, border:`1px solid ${idx===i&&tab!=="week"?C.accent:C.border}`, borderRadius:10, color:idx===i&&tab!=="week"?"#fff":C.muted, padding:"9px 16px", fontSize:13, cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap", flexShrink:0, fontWeight:idx===i&&tab!=="week"?700:400 }}>
-            {d.label}
+      {/* Month switcher */}
+      <div style={{ display:"flex", gap:6, marginBottom:14, background:C.card, borderRadius:12, padding:4 }}>
+        {Object.entries(MONTHS).map(([key,m]) => (
+          <button key={key} onClick={()=>handleMonthSwitch(key)} style={{ flex:1, padding:"10px 0", border:"none", borderRadius:9, background:activeMonth===key?C.accent:"transparent", color:activeMonth===key?"#fff":C.muted, fontSize:13, fontWeight:activeMonth===key?700:400, cursor:"pointer", fontFamily:"inherit" }}>
+            {m.label}
           </button>
         ))}
+      </div>
+
+      {/* Day tabs */}
+      <div style={{ display:"flex", gap:6, overflowX:"auto", paddingBottom:6, marginBottom:16, WebkitOverflowScrolling:"touch" }}>
+        {days.map((d,i) => {
+          if (d.month !== activeMonth) return null;
+          return (
+            <button key={d.id} onClick={()=>{setIdx(i);setTab("stores");}}
+              style={{ background:idx===i&&tab!=="week"?C.accent:C.card, border:`1px solid ${idx===i&&tab!=="week"?C.accent:C.border}`, borderRadius:10, color:idx===i&&tab!=="week"?"#fff":C.muted, padding:"9px 16px", fontSize:13, cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap", flexShrink:0, fontWeight:idx===i&&tab!=="week"?700:400 }}>
+              {d.label}
+            </button>
+          );
+        })}
         <button onClick={addDay} style={{ background:"transparent", border:`1px dashed ${C.dim}`, borderRadius:10, color:C.dim, padding:"9px 16px", fontSize:13, cursor:"pointer", fontFamily:"inherit", flexShrink:0, whiteSpace:"nowrap" }}>
-          + Day {days.length+1}
+          + Day {monthDays.length+1}
         </button>
         <button onClick={()=>setTab("week")} style={{ background:tab==="week"?`${C.purple}20`:"transparent", border:`1px solid ${tab==="week"?C.purple:C.dim}`, borderRadius:10, color:tab==="week"?C.purple:C.dim, padding:"9px 16px", fontSize:13, cursor:"pointer", fontFamily:"inherit", flexShrink:0 }}>
           📊 Week
         </button>
       </div>
 
-      {tab==="week" && <WeekView days={days} />}
+      {tab==="week" && <WeekView days={days} activeMonth={activeMonth} />}
 
       {tab!=="week" && day && (
         <div>
@@ -607,7 +975,7 @@ export default function App() {
               {day.date && <span style={{ fontSize:13, color:C.muted, fontWeight:400, marginLeft:10 }}>{day.date}</span>}
             </div>
             <SLabel text="Route / Area" />
-            <input value={day.route} onChange={e=>updateDay({route:e.target.value})} placeholder="e.g. Matunga, Sion…" style={iS} />
+            <input value={day.route||""} onChange={e=>updateDay({route:e.target.value})} placeholder="e.g. Matunga, Sion…" style={iS} />
             <SLabel text="📝 Day Notes (optional)" />
             <textarea value={day.dayNotes||""} onChange={e=>updateDay({dayNotes:e.target.value})} placeholder="Market observations, competitor activity…" rows={3} style={{ ...iS, resize:"vertical", lineHeight:1.6 }} />
           </div>
@@ -641,28 +1009,31 @@ export default function App() {
             </div>
           )}
 
-          {!day.summaryOnly && tab==="stores" && (
+          {!day.summaryOnly && tab==="stores" && st && (
             <div>
               <div style={{ display:"flex", gap:8, marginBottom:14, flexWrap:"wrap" }}>
-                {[["Visited",st.visited,`of ${day.stores.length}`,C.accent],["Orders",st.ordered,`min ${DAILY_TARGET}`,hit?C.green:C.red],["Flexi",st.superFlexi,"",C.cyan],["Sens",st.sensitiveTpOrdered,"",C.purple],["CDC",st.cdc200,"",C.orange]].map(([l,v,sub,c]) => (
+                {statTiles.map(([l,v,sub,c]) => (
                   <div key={l} style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:12, padding:"11px 8px", flex:1, minWidth:52 }}>
                     <div style={{ fontSize:9, color:C.muted, letterSpacing:1, textTransform:"uppercase", marginBottom:2 }}>{l}</div>
-                    <div style={{ fontSize:20, fontWeight:900, color:c, lineHeight:1 }}>{v}</div>
-                    {sub && <div style={{ fontSize:9, color:C.dim, marginTop:2 }}>{sub}</div>}
+                    <div style={{ fontSize:20, fontWeight:900, color:c||C.text, lineHeight:1 }}>{v??0}</div>
+                    {sub ? <div style={{ fontSize:9, color:C.dim, marginTop:2 }}>{sub}</div> : null}
                   </div>
                 ))}
               </div>
+
               <div style={{ marginBottom:16 }}>
                 <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:C.muted, marginBottom:5 }}>
                   <span>Bill cuts</span>
-                  <span style={{ color:hit?C.green:C.amber, fontWeight:700 }}>{hit?"✓ Target hit!":`${DAILY_TARGET-st.ordered} to go`}</span>
+                  <span style={{ color:hit?C.green:C.amber, fontWeight:700 }}>{hit?"✓ Target hit!":`${DAILY_TARGET-(st.ordered||0)} to go`}</span>
                 </div>
                 <div style={{ background:C.dim, borderRadius:6, height:7, overflow:"hidden" }}>
                   <div style={{ height:"100%", borderRadius:6, width:`${pct}%`, background:hit?C.green:`linear-gradient(90deg,${C.accent},${C.purple})`, transition:"width .5s" }} />
                 </div>
               </div>
+
               {day.stores.length===0 && <div style={{ textAlign:"center", color:C.dim, padding:"36px 0", fontSize:14 }}>No stores yet. Add your first one below.</div>}
               {day.stores.map(s => <StoreCard key={s.id} store={s} onChange={updateStore} onDelete={deleteStore} />)}
+
               {showAdd ? (
                 <div style={{ background:C.card, border:`1px dashed ${C.border}`, borderRadius:14, padding:16, marginTop:4 }}>
                   <div style={{ fontSize:15, fontWeight:700, marginBottom:14 }}>New Store</div>
@@ -687,6 +1058,7 @@ export default function App() {
               </button>
             </div>
           )}
+
           {tab==="summary" && <DaySummary day={day} />}
         </div>
       )}
